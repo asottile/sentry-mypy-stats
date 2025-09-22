@@ -1,0 +1,20 @@
+on:
+  workflow_dispatch:
+    inputs:
+      shas:
+        required: true
+      artifact:
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - run: git clone --branch master https://github.com/getsentry/sentry ../sentry
+    - run: python -m main --jobs 2 ${{ inputs.shas }}
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact }}
+        path: data
+        retention-days: 1
