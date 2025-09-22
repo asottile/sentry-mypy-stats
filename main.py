@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import queue
+import shutil
+import subprocess
+import tempfile
+import threading
+from collections.abc import Generator
+
+SRC = os.path.abspath('../sentry')
+DATA = os.path.abspath('data')
+CACHE = os.path.abspath('cache')
+VENDOR = os.path.abspath('vendor')
+FIRST_COMMIT = 'b1767a6a76ee31f8c63a37ae1dfb9eca82172edf'
+LAST_COMMIT = 'b6083b163df0984becf8596976f60c9a30d41532'
+
+PROG = '''\
+pip install \
+    --cache-dir /cache/pip \
+    --disable-pip-version-check \
+    --quiet \
+    --root-user-action=ignore \
+    uv==0.8.19
+
+uv venv /.venv --quiet --no-managed-python -p $(which python)
+export PATH=/.venv/bin:$PATH VIRTUAL_ENV=/.venv
+
+cd /src
+if [ -f requirements-dev-frozen.txt ]; then
+    uv pip install -r requirements-dev-frozen.txt --cache-dir /cache/uv --quiet
+else
+    uv sync --active --frozen --quiet --cache-dir /cache/uv
+fi
+
+python /vendor/fast_editable.py >& /dev/null
+
+sentry init
+
+pip freeze | grep '^mypy==' > /data/mypy-version
+
+! python -m tools.mypy_helpers.mypy_without_ignores > /data/mypy-out
+'''
+
+
+def _threaded_worker(q: queue.Queue[str]) -> None:
+    while True:
+        try:
+            cid = q.get(timeout=.5)
+        except queue.Empty:
+            return
+
+        ver_cmd = ('git', '-C', SRC, 'show', f'{cid}:.python-version')
+        version = subprocess.check_output(ver_cmd).decode().strip()
+        ver, _ = version.rsplit('.', 1)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            src = os.path.join(tmpdir, 'src')
+            data = os.path.join(tmpdir, 'data')
+            os.makedirs(data)
+
+            subprocess.check_call(('cp', '-r', SRC, src))
+            subprocess.check_call(('git', '-C', src, 'checkout', '-q', cid))
+
+            info_out = subprocess.check_output((
+                'git', '-C', src,
+                'show', '--no-patch', '--format=%an <%ae>\t%ct', 'HEAD',
+            )).strip().decode()
+            author, ct_s = info_out.split('\t')
+
+            subprocess.check_call((
+                'docker', 'run', '--rm',
+                '-v', f'{VENDOR}:/vendor:ro',
+                '-v', f'{CACHE}:/cache:rw',
+                '-v', f'{data}:/data:rw',
+                '-v', f'{src}:/src:rw',
+                f'python:{ver}-slim',
+                'bash', '-euc', PROG,
+            ))
+
+            with open(os.path.join(data, 'mypy-version')) as f:
+                mypy_version = f.read().strip()
+
+            with tempfile.TemporaryDirectory(dir=DATA, delete=False) as tdir:
+                info = {
+                    'python': ver,
+                    'mypy': mypy_version,
+                    'author': author,
+                    'commit_time': int(ct_s),
+                }
+                info_json = os.path.join(tdir, 'info.json')
+                with open(info_json, 'w') as f:
+                    json.dump(info, f)
+
+                shutil.copy(os.path.join(data, 'mypy-out'), tdir)
+
+                os.rename(tdir, os.path.join(DATA, cid))
+
+
+@contextlib.contextmanager
+def ctrl_c(q: queue.Queue[str]) -> Generator[None]:
+    try:
+        yield
+    except KeyboardInterrupt:
+        while True:
+            try:
+                q.get(timeout=.1)
+            except queue.Empty:
+                break
+        raise
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
+    args = parser.parse_args()
+
+    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(CACHE, exist_ok=True)
+
+    os.makedirs(VENDOR, exist_ok=True)
+    with open(os.path.join(VENDOR, 'fast_editable.py'), 'w') as f:
+        cmd = ('git', '-C', SRC, 'show', 'cef27b49ea4:tools/fast_editable.py')
+        subprocess.check_call(cmd, stdout=f)
+
+    out = subprocess.check_output((
+        'git', '-C', SRC,
+        'log', '--format=%H', '--reverse',
+        f'{FIRST_COMMIT}..{LAST_COMMIT}', '--', '*.py',
+    ))
+    commit_ids = [line.decode() for line in out.splitlines()]
+    # ok git :)
+    commit_ids.insert(0, FIRST_COMMIT)
+
+    completed = set()
+    for maybe_done in os.listdir(DATA):
+        if (
+                len(maybe_done) == 40 and
+                all(
+                    os.path.exists(os.path.join(DATA, maybe_done, fn))
+                    for fn in ('info.json', 'mypy-out')
+                )
+        ):
+            completed.add(maybe_done)
+        else:
+            shutil.rmtree(os.path.join(DATA, maybe_done))
+
+    todo = [cid for cid in commit_ids if cid not in completed]
+    print(f'skipping {len(commit_ids) - len(todo)} already done!')
+
+    q: queue.Queue[str] = queue.Queue()
+    for cid in todo:
+        q.put(cid)
+
+    threads = []
+    with ctrl_c(q):
+        for _ in range(args.jobs):
+            t = threading.Thread(target=_threaded_worker, args=(q,))
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
