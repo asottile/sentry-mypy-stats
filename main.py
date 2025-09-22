@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import queue
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
-from collections.abc import Generator
 
 SRC = os.path.abspath('../sentry')
 DATA = os.path.abspath('data')
@@ -100,19 +99,6 @@ def _threaded_worker(q: queue.Queue[str]) -> None:
                 os.rename(tdir, os.path.join(DATA, cid))
 
 
-@contextlib.contextmanager
-def ctrl_c(q: queue.Queue[str]) -> Generator[None]:
-    try:
-        yield
-    except KeyboardInterrupt:
-        while True:
-            try:
-                q.get(timeout=.1)
-            except queue.Empty:
-                break
-        raise
-
-
 def _determine_commits() -> list[str]:
     out = subprocess.check_output((
         'git', '-C', SRC,
@@ -164,15 +150,25 @@ def main() -> int:
     for cid in todo:
         q.put(cid)
 
-    threads = []
-    with ctrl_c(q):
-        for _ in range(args.jobs):
-            t = threading.Thread(target=_threaded_worker, args=(q,))
-            threads.append(t)
-            t.start()
+    def _clear_queue(*a: object) -> None:
+        print('USR1: clearing queue and exiting...')
+        while True:
+            try:
+                q.get(timeout=.1)
+            except queue.Empty:
+                break
+        raise SystemExit(1)
 
-        for t in threads:
-            t.join()
+    signal.signal(signal.SIGUSR1, _clear_queue)
+
+    threads = []
+    for _ in range(args.jobs):
+        t = threading.Thread(target=_threaded_worker, args=(q,))
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
 
     return 0
 
