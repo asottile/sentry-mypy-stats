@@ -113,19 +113,7 @@ def ctrl_c(q: queue.Queue[str]) -> Generator[None]:
         raise
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
-    args = parser.parse_args()
-
-    os.makedirs(DATA, exist_ok=True)
-    os.makedirs(CACHE, exist_ok=True)
-
-    os.makedirs(VENDOR, exist_ok=True)
-    with open(os.path.join(VENDOR, 'fast_editable.py'), 'w') as f:
-        cmd = ('git', '-C', SRC, 'show', 'cef27b49ea4:tools/fast_editable.py')
-        subprocess.check_call(cmd, stdout=f)
-
+def _determine_commits() -> list[str]:
     out = subprocess.check_output((
         'git', '-C', SRC,
         'log', '--format=%H', '--reverse',
@@ -150,6 +138,27 @@ def main() -> int:
 
     todo = [cid for cid in commit_ids if cid not in completed]
     print(f'skipping {len(commit_ids) - len(todo)} already done!')
+    return todo
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
+    parser.add_argument('cid', nargs='*', default=[])
+    args = parser.parse_args()
+
+    os.makedirs(DATA, exist_ok=True)
+    os.makedirs(CACHE, exist_ok=True)
+
+    os.makedirs(VENDOR, exist_ok=True)
+    with open(os.path.join(VENDOR, 'fast_editable.py'), 'w') as f:
+        cmd = ('git', '-C', SRC, 'show', 'cef27b49ea4:tools/fast_editable.py')
+        subprocess.check_call(cmd, stdout=f)
+
+    if args.cid:
+        todo = args.cid
+    else:
+        todo = _determine_commits()
 
     q: queue.Queue[str] = queue.Queue()
     for cid in todo:
