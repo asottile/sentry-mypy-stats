@@ -71,7 +71,7 @@ def _threaded_worker(q: queue.Queue[str]) -> None:
             author, ct_s = info_out.split('\t')
 
             subprocess.check_call((
-                'docker', 'run', '--rm',
+                'podman', 'run', '--rm',
                 '-v', f'{VENDOR}:/vendor:ro',
                 '-v', f'{CACHE}:/cache:rw',
                 '-v', f'{data}:/data:rw',
