@@ -17,6 +17,35 @@ VENDOR = os.path.abspath('vendor')
 FIRST_COMMIT = 'b1767a6a76ee31f8c63a37ae1dfb9eca82172edf'
 LAST_COMMIT = 'b6083b163df0984becf8596976f60c9a30d41532'
 
+
+def _determine_commits() -> list[str]:
+    out = subprocess.check_output((
+        'git', '-C', SRC,
+        'log', '--format=%H', '--reverse',
+        f'{FIRST_COMMIT}..{LAST_COMMIT}', '--', '*.py',
+    ))
+    commit_ids = [line.decode() for line in out.splitlines()]
+    # ok git :)
+    commit_ids.insert(0, FIRST_COMMIT)
+
+    completed = set()
+    for maybe_done in os.listdir(DATA):
+        if (
+                len(maybe_done) == 40 and
+                all(
+                    os.path.exists(os.path.join(DATA, maybe_done, fn))
+                    for fn in ('info.json', 'mypy-out')
+                )
+        ):
+            completed.add(maybe_done)
+        else:
+            shutil.rmtree(os.path.join(DATA, maybe_done))
+
+    todo = [cid for cid in commit_ids if cid not in completed]
+    print(f'skipping {len(commit_ids) - len(todo)} already done!')
+    return todo
+
+
 PROG = '''\
 pip install \
     --cache-dir /cache/pip \
@@ -100,34 +129,6 @@ def _threaded_worker(q: queue.Queue[str]) -> None:
                 shutil.copy(os.path.join(data, 'mypy-out'), tdir)
 
                 os.rename(tdir, os.path.join(DATA, cid))
-
-
-def _determine_commits() -> list[str]:
-    out = subprocess.check_output((
-        'git', '-C', SRC,
-        'log', '--format=%H', '--reverse',
-        f'{FIRST_COMMIT}..{LAST_COMMIT}', '--', '*.py',
-    ))
-    commit_ids = [line.decode() for line in out.splitlines()]
-    # ok git :)
-    commit_ids.insert(0, FIRST_COMMIT)
-
-    completed = set()
-    for maybe_done in os.listdir(DATA):
-        if (
-                len(maybe_done) == 40 and
-                all(
-                    os.path.exists(os.path.join(DATA, maybe_done, fn))
-                    for fn in ('info.json', 'mypy-out')
-                )
-        ):
-            completed.add(maybe_done)
-        else:
-            shutil.rmtree(os.path.join(DATA, maybe_done))
-
-    todo = [cid for cid in commit_ids if cid not in completed]
-    print(f'skipping {len(commit_ids) - len(todo)} already done!')
-    return todo
 
 
 def main() -> int:
