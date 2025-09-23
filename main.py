@@ -61,7 +61,10 @@ def _threaded_worker(q: queue.Queue[str]) -> None:
             data = os.path.join(tmpdir, 'data')
             os.makedirs(data)
 
-            subprocess.check_call(('cp', '-r', SRC, src))
+            subprocess.check_call((
+                'git', 'clone', '--quiet', '--shared', '--no-checkout',
+                SRC, src,
+            ))
             subprocess.check_call(('git', '-C', src, 'checkout', '-q', cid))
 
             info_out = subprocess.check_output((
