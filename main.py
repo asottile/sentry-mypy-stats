@@ -7,8 +7,10 @@ import queue
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
+from typing import NamedTuple
 
 SRC = os.path.abspath('../sentry')
 DATA = os.path.abspath('data')
@@ -131,9 +133,54 @@ def _threaded_worker(q: queue.Queue[str]) -> None:
                 os.rename(tdir, os.path.join(DATA, cid))
 
 
+class SSH(NamedTuple):
+    host: str
+    jobs: int
+
+    @classmethod
+    def parse(cls, s: str) -> SSH:
+        host, jobs_s = s.rsplit(',', 1)
+        return cls(host, int(jobs_s))
+
+
+def _ssh_worker(q: queue.Queue[str], ssh: SSH) -> None:
+    while True:
+        items = []
+        for _ in range(ssh.jobs):
+            try:
+                items.append(q.get(block=False))
+            except queue.Empty:
+                break
+        if not items:
+            return
+
+        rm_cmd = ('ssh', ssh.host, 'rm -rf ~/workspace/sentry-mypy-stats/data')
+        subprocess.check_call(rm_cmd)
+
+        pyver = f'python{sys.version_info.major}.{sys.version_info.minor}'
+        subprocess.check_call((
+            'ssh', ssh.host,
+            f'cd ~/workspace/sentry-mypy-stats && '
+            f'{pyver} -m main --jobs {ssh.jobs} {" ".join(items)}',
+        ))
+
+        with tempfile.TemporaryDirectory(dir=DATA) as tmpdir:
+            subprocess.check_call((
+                'scp', '-r', '-q',
+                f'{ssh.host}:workspace/sentry-mypy-stats/data', tmpdir,
+            ))
+            data = os.path.join(tmpdir, 'data')
+            for name in os.listdir(data):
+                os.rename(
+                    os.path.join(data, name),
+                    os.path.join(DATA, name),
+                )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
+    parser.add_argument('--ssh', type=SSH.parse, action='append', default=[])
     parser.add_argument('cid', nargs='*', default=[])
     args = parser.parse_args()
 
@@ -166,8 +213,14 @@ def main() -> int:
     signal.signal(signal.SIGUSR1, _clear_queue)
 
     threads = []
+
     for _ in range(args.jobs):
         t = threading.Thread(target=_threaded_worker, args=(q,))
+        threads.append(t)
+        t.start()
+
+    for info in args.ssh:
+        t = threading.Thread(target=_ssh_worker, args=(q, info))
         threads.append(t)
         t.start()
 
