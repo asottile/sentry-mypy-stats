@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import queue
@@ -10,6 +11,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.request
+import uuid
+import zipfile
 from typing import NamedTuple
 
 SRC = os.path.abspath('../sentry')
@@ -177,10 +182,77 @@ def _ssh_worker(q: queue.Queue[str], ssh: SSH) -> None:
                 )
 
 
+def _gha_worker(q: queue.Queue[str]) -> None:
+    with open(os.path.expanduser('~/.github-auth.json')) as f:
+        token = json.load(f)['token']
+
+    while True:
+        items = []
+        for _ in range(16):
+            try:
+                items.append(q.get(block=False))
+            except queue.Empty:
+                break
+        if not items:
+            return
+
+        aid = str(uuid.uuid4())
+        data = {
+            'ref': 'main',
+            'inputs': {'artifact': aid, 'shas': ' '.join(items)},
+        }
+        headers = {'Authorization': f'Bearer {token}'}
+
+        req = urllib.request.Request(
+            'https://api.github.com/repos/asottile/sentry-mypy-stats/actions/workflows/run.yml/dispatches',  # noqa: E501
+            method='POST',
+            data=json.dumps(data).encode(),
+            headers=headers,
+        )
+        urllib.request.urlopen(req).close()
+
+        time.sleep(120)
+
+        while True:
+            req = urllib.request.Request(
+                f'https://api.github.com/repos/asottile/sentry-mypy-stats/actions/artifacts?name={aid}',  # noqa: E501
+                headers=headers,
+            )
+            artifacts_resp = json.load(urllib.request.urlopen(req))
+            if artifacts_resp['artifacts']:
+                break
+            else:
+                time.sleep(2)
+
+        artifact, = artifacts_resp['artifacts']
+        req = urllib.request.Request(artifact['archive_download_url'])
+        for k, v in headers.items():
+            req.add_unredirected_header(k, v)
+        contents = urllib.request.urlopen(req).read()
+
+        with tempfile.TemporaryDirectory(dir=DATA) as tmpdir:
+            zipf = zipfile.ZipFile(io.BytesIO(contents))
+            zipf.extractall(tmpdir)
+
+            for name in os.listdir(tmpdir):
+                os.rename(
+                    os.path.join(tmpdir, name),
+                    os.path.join(DATA, name),
+                )
+
+        req = urllib.request.Request(
+            artifact['url'],
+            method='DELETE',
+            headers=headers,
+        )
+        urllib.request.urlopen(req).close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 8)
     parser.add_argument('--ssh', type=SSH.parse, action='append', default=[])
+    parser.add_argument('--gha-jobs', type=int, default=0)
     parser.add_argument('cid', nargs='*', default=[])
     args = parser.parse_args()
 
@@ -221,6 +293,11 @@ def main() -> int:
 
     for info in args.ssh:
         t = threading.Thread(target=_ssh_worker, args=(q, info))
+        threads.append(t)
+        t.start()
+
+    for _ in range(args.gha_jobs):
+        t = threading.Thread(target=_gha_worker, args=(q,))
         threads.append(t)
         t.start()
 
