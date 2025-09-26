@@ -211,18 +211,23 @@ def _gha_worker(q: queue.Queue[str]) -> None:
         )
         urllib.request.urlopen(req).close()
 
-        time.sleep(120)
+        time.sleep(1200)
 
         while True:
-            req = urllib.request.Request(
-                f'https://api.github.com/repos/asottile/sentry-mypy-stats/actions/artifacts?name={aid}',  # noqa: E501
-                headers=headers,
-            )
-            artifacts_resp = json.load(urllib.request.urlopen(req))
-            if artifacts_resp['artifacts']:
-                break
+            try:
+                req = urllib.request.Request(
+                    f'https://api.github.com/repos/asottile/sentry-mypy-stats/actions/artifacts?name={aid}',  # noqa: E501
+                    headers=headers,
+                )
+                artifacts_resp = json.load(urllib.request.urlopen(req))
+            except urllib.error.URLError:
+                time.sleep(5)
+                continue
             else:
-                time.sleep(2)
+                if artifacts_resp['artifacts']:
+                    break
+                else:
+                    time.sleep(2)
 
         artifact, = artifacts_resp['artifacts']
         req = urllib.request.Request(artifact['archive_download_url'])
