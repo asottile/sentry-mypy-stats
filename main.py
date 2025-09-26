@@ -29,7 +29,9 @@ def _determine_commits() -> list[str]:
     out = subprocess.check_output((
         'git', '-C', SRC,
         'log', '--format=%H', '--reverse',
-        f'{FIRST_COMMIT}..{LAST_COMMIT}', '--', '*.py',
+        f'{FIRST_COMMIT}..{LAST_COMMIT}', '--',
+        '*.py', '*.pyi', 'requirements*.txt', 'pyproject.toml',
+        '.python-version',
     ))
     commit_ids = [line.decode() for line in out.splitlines()]
     # ok git :)
